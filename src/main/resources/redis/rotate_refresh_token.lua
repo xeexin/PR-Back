@@ -1,42 +1,28 @@
--- Refresh Token 회전을 원자적으로 처리한다. (유예 처리 포함)
+-- Refresh Token 회전을 원자적으로 처리한다. 판정(재사용/유예)과 회전을 한 스크립트에서 끝낸다.
 -- KEYS[1] used_token:{old}      KEYS[2] token_mapping:{old}
 -- KEYS[3] token_mapping:{new}   KEYS[4] refresh_token:{userId}
--- KEYS[5] rotation_grace:{old}
--- ARGV[1] userId (직렬화된 값, token_mapping 값과 동일한 바이트)
--- ARGV[2] RefreshTokenInfo (직렬화된 JSON)
--- ARGV[3] refreshTtlSec  ARGV[4] usedTtlSec
--- ARGV[5] newToken (원문)  ARGV[6] gracePeriodMs (0이면 유예 없음)
--- 반환:  'OK'            = 회전 성공 (새 토큰 = ARGV[5])
---        'GRACE:<token>' = 유예 시간 안의 재요청 → 직전에 발급한 토큰을 그대로 돌려줌
---        'REUSED'        = 이미 사용된 토큰 + 유예 불가 → 재사용 공격으로 간주
---        'INVALID'       = 매핑이 없거나 소유자가 다름 (만료/무효화된 토큰)
+-- KEYS[5] reuse_grace:{old}
+-- ARGV[1] userId  ARGV[2] newToken  ARGV[3] refreshTtlSec  ARGV[4] usedTtlSec  ARGV[5] graceSec
+-- 반환: {판정, 돌려줄 Refresh Token}
+--   ROTATED        처음 쓰는 토큰. newToken 으로 회전
+--   GRACE_HIT      유예 안에 다시 온 직전 토큰이고, 사용자의 현재 토큰이 그때 발급한 토큰 그대로.
+--                  새로 발급하지 않고 그 토큰을 돌려준다(토큰 체인이 갈라지지 않음)
+--   REUSE_DETECTED 유예가 지났거나, 그 사이 다음 토큰으로 이미 회전됐거나, 로그아웃/무효화된 상태
 
 if redis.call('EXISTS', KEYS[1]) == 1 then
-    -- 유예 조건: 유예 키가 살아 있고, 그 토큰이 아직 사용자의 현재 토큰일 때만
-    -- (그 사이 한 번 더 회전됐거나 무효화됐다면 유예하지 않는다)
-    local graceToken = redis.call('GET', KEYS[5])
-    if graceToken then
-        local current = redis.call('GET', KEYS[4])
-        if current then
-            local ok, info = pcall(cjson.decode, current)
-            if ok and type(info) == 'table' and info.token == graceToken then
-                return 'GRACE:' .. graceToken
-            end
-        end
+    local graced = redis.call('GET', KEYS[5])
+    local current = redis.call('GET', KEYS[4])
+    if graced and current and graced == current then
+        return {'GRACE_HIT', graced}
     end
-    return 'REUSED'
-end
-
-local owner = redis.call('GET', KEYS[2])
-if (not owner) or owner ~= ARGV[1] then
-    return 'INVALID'
+    return {'REUSE_DETECTED', ''}
 end
 
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[4])
 redis.call('DEL', KEYS[2])
 redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[3])
 redis.call('SET', KEYS[4], ARGV[2], 'EX', ARGV[3])
-if tonumber(ARGV[6]) > 0 then
-    redis.call('SET', KEYS[5], ARGV[5], 'PX', ARGV[6])
+if tonumber(ARGV[5]) > 0 then
+    redis.call('SET', KEYS[5], ARGV[2], 'EX', ARGV[5])
 end
-return 'OK'
+return {'ROTATED', ARGV[2]}
