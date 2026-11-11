@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -154,6 +155,23 @@ class ConcurrentReissueReuseTest {
             if (reissue(t1) == null && loggedOut(user) && reissue(t3) == null) detected++;
         }
         report("reuse_after_rerotate", "-", detected, 0, "");
+    }
+
+    /**
+     * 사용 이력(used_token)은 Refresh Token 수명만큼 남아야 한다.
+     * 더 짧으면 공격자가 먼저 회전한 뒤 피해자가 이력 만료 후 옛 토큰으로 돌아올 때 탐지되지 않는다.
+     */
+    @Test
+    void 사용이력_TTL은_토큰_수명과_같다() {
+        User user = newUser();
+        String t1 = tokenService.issueRefreshToken(user.getUserId());
+        reissue(t1);
+
+        Long usedTtl = redis.getExpire("used_token:" + t1, TimeUnit.SECONDS);
+        Long refreshTtl = redis.getExpire("refresh_token:" + user.getUserId(), TimeUnit.SECONDS);
+        org.assertj.core.api.Assertions.assertThat(usedTtl)
+                .isGreaterThan(Duration.ofDays(13).toSeconds())
+                .isCloseTo(refreshTtl, org.assertj.core.data.Offset.offset(5L));
     }
 
     // ---------------------------------------------------------------- helpers

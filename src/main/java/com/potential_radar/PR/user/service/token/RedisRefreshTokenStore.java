@@ -1,5 +1,6 @@
 package com.potential_radar.PR.user.service.token;
 
+import com.potential_radar.PR.config.jwt.JwtProperties;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -17,7 +18,7 @@ import java.util.Optional;
  *
  *   refresh_token:{userId} -> token       (사용자의 현재 토큰)
  *   token_mapping:{token}  -> userId      (토큰 → 사용자 역조회)
- *   used_token:{token}     -> userId      (회전된 토큰, 재사용 탐지용)
+ *   used_token:{token}     -> userId      (회전된 토큰, 재사용 탐지용. TTL = Refresh Token 수명)
  *   reuse_grace:{token}    -> newToken    (회전 직후 N초 동안만. 동시 요청에 같은 새 토큰을 돌려주기 위함)
  */
 @Component
@@ -28,7 +29,6 @@ public class RedisRefreshTokenStore implements RefreshTokenStore {
     static final String TOKEN_MAPPING_PREFIX = "token_mapping:";
     static final String USED_TOKEN_PREFIX = "used_token:";
     static final String REUSE_GRACE_PREFIX = "reuse_grace:";
-    static final Duration USED_TOKEN_TTL = Duration.ofDays(7);
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static final RedisScript<List<String>> ROTATE_SCRIPT =
@@ -36,6 +36,7 @@ public class RedisRefreshTokenStore implements RefreshTokenStore {
 
     private final StringRedisTemplate redis;
     private final TokenStoreProperties props;
+    private final JwtProperties jwtProperties;
 
     @Override
     public void save(Long userId, String token, Duration ttl) {
@@ -71,7 +72,7 @@ public class RedisRefreshTokenStore implements RefreshTokenStore {
                 String.valueOf(userId),
                 newToken,
                 String.valueOf(ttl.toSeconds()),
-                String.valueOf(USED_TOKEN_TTL.toSeconds()),
+                String.valueOf(usedTokenTtl().toSeconds()),
                 String.valueOf(props.getReuseGraceSeconds()));
         return switch (result.get(0)) {
             case "ROTATED" -> RotateResult.rotated(result.get(1));
@@ -98,7 +99,16 @@ public class RedisRefreshTokenStore implements RefreshTokenStore {
     }
 
     private void markUsed(String token, Long userId) {
-        redis.opsForValue().set(USED_TOKEN_PREFIX + token, String.valueOf(userId), USED_TOKEN_TTL);
+        redis.opsForValue().set(USED_TOKEN_PREFIX + token, String.valueOf(userId), usedTokenTtl());
+    }
+
+    /**
+     * 사용 이력 보관 기간. Refresh Token 수명과 같아야 한다.
+     * 더 짧으면, 공격자가 먼저 회전한 뒤 피해자가 이력 만료 후에 옛 토큰으로 돌아올 때
+     * 단순 거절만 되고 재사용으로 탐지되지 않아 공격자의 토큰 체인이 살아남는다.
+     */
+    Duration usedTokenTtl() {
+        return Duration.ofMillis(jwtProperties.getRefreshTokenExpiration());
     }
 
     private static String readScript(String path) {
